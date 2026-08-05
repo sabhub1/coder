@@ -140,6 +140,39 @@ local function findRiddleSubmitRemote()
     return f[1]
 end
 
+-- Try to detect Notification-style remotes (Phi/NotificationController) by inspecting
+-- client connections. This mirrors the approach used by TestSender so VenomHub can
+-- hook remotes that don't include "announce" in their name.
+local function findNotificationRemote()
+    -- allow user to predefine the remote via _G
+    if _G and _G.PhiNotifyRemote then return _G.PhiNotifyRemote end
+
+    if type(getconnections) ~= "function" then return nil end
+    local getinfo = debug and (debug.getinfo or debug.info)
+    if not getinfo then return nil end
+
+    local roots = {ReplicatedStorage, workspace, PlayerGui}
+    for _,root in ipairs(roots) do
+        for _,d in ipairs(root:GetDescendants()) do
+            if d.ClassName == "RemoteEvent" then
+                local ok, cs = pcall(getconnections, d.OnClientEvent)
+                if ok and cs then
+                    for _,c in ipairs(cs) do
+                        local fOk, fn = pcall(function() return c.Function end)
+                        if fOk and type(fn) == "function" then
+                            local iOk, info = pcall(getinfo, fn)
+                            if iOk and tostring(info.short_src or info.source or ""):lower():find("notificationcontroller") then
+                                return d
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function fireRemoteSafe(remote, ...)
     if not remote then return false, "no remote found" end
     local ok, err = pcall(function()
@@ -349,6 +382,28 @@ local function connectAnnouncementListeners()
     for _,d in ipairs(workspace:GetDescendants()) do watchDesc(d) end
     listeners["repAdded"] = ReplicatedStorage.DescendantAdded:Connect(watchDesc)
     listeners["wsAdded"] = workspace.DescendantAdded:Connect(watchDesc)
+
+    -- Additionally, try to hook NotificationController-/Phi-style remotes that don't include
+    -- "announce" in their name by inspecting client connections (if available).
+    local notifyRemote = findNotificationRemote()
+    if notifyRemote then
+        local key = "notify_"..tostring(notifyRemote:GetDebugId())
+        if not listeners[key] then
+            local con = notifyRemote.OnClientEvent:Connect(function(data, ...)
+                -- Phi/TestSender typically fires a plain string as first arg; some remotes send tables
+                local msg, from = "", notifyRemote.Name
+                if type(data) == "table" then
+                    msg = data.message or data.text or tostring(data[1] or "")
+                    from = data.from or data.sender or from
+                else
+                    msg = tostring(data)
+                end
+                onAnnouncement(from, msg, "notify:"..tostring(notifyRemote:GetDebugId()))
+            end)
+            listeners[key] = con
+            sendNotification("Venom Hub", "Hooked notification remote: "..tostring(notifyRemote.Name), 3)
+        end
+    end
 end
 
 -- UI (small, draggable, mutually exclusive mode buttons)
